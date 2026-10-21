@@ -156,7 +156,21 @@ def buscar_mejor_information_gain_variable(x, y, criterio=entropy_impurity,
     return max_gain, best_midpoint
 
 
+# ---------------------------------------------------------------------------
+# Nodo y árbol
+# ---------------------------------------------------------------------------
+
 class Nodo:
+    """Nodo de un árbol de decisión.
+
+    feature           índice de la variable usada para dividir (None en hojas)
+    umbral            valor de corte: izquierda si x <= umbral, derecha si x > umbral
+    gini              impureza del nodo según el criterio del árbol
+    cantidad_muestras muestras de entrenamiento que llegaron al nodo
+    valor             clase mayoritaria (lo que predice el nodo)
+    izquierda/derecha nodos hijos
+    """
+
     def __init__(self, feature=None, umbral=None, gini=None,
                  cantidad_muestras=None, valor=None,
                  izquierda=None, derecha=None):
@@ -167,6 +181,15 @@ class Nodo:
         self.valor = valor
         self.izquierda = izquierda
         self.derecha = derecha
+
+    def es_hoja(self):
+        return self.izquierda is None and self.derecha is None
+
+    def __repr__(self):
+        if self.es_hoja():
+            return f"Hoja(valor={self.valor}, muestras={self.cantidad_muestras}, gini={self.gini:.3f})"
+        return (f"Nodo(feature={self.feature}, umbral={self.umbral:.3f}, "
+                f"muestras={self.cantidad_muestras}, gini={self.gini:.3f})")
 
 
 class ArbolDecision:
