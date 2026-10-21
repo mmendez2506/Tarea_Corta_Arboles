@@ -193,14 +193,83 @@ class Nodo:
 
 
 class ArbolDecision:
+    """Árbol de decisión de clasificación.
+
+    max_depth          cantidad máxima de variables que se pueden explorar en un camino
+                       de la raíz a una hoja, es decir, la profundidad máxima del árbol:
+                       cada nivel evalúa una variable. None = sin límite; la raíz es el nivel 0.
+    min_split_samples  mínimo de muestras que debe tener un nodo para poder dividirse.
+    criterio           "gini", "entropia" o directamente gini_impurity / entropy_impurity.
+    """
+
     def __init__(self, max_depth=5, min_split_samples=2, criterio="gini"):
+        if max_depth is not None and max_depth < 0:
+            raise ValueError("max_depth debe ser >= 0 o None")
+        if min_split_samples < 2:
+            raise ValueError("min_split_samples debe ser >= 2")
         self.max_depth = max_depth
         self.min_split_samples = min_split_samples
         self.criterio = criterio
         self.raiz = None
+        self.clases_ = None
+        self.nombres_features_ = None
 
+    # ---------------------------------------------------------------- fit
     def fit(self, X, y):
-        raise NotImplementedError
+        X, nombres = self._a_matriz(X)
+        y = np.asarray(y).ravel()
+        if X.shape[0] != y.shape[0]:
+            raise ValueError("X y y deben tener la misma cantidad de filas")
+        if X.shape[0] == 0:
+            raise ValueError("No se puede entrenar con 0 muestras")
 
-    def predict(self, X):
-        raise NotImplementedError
+        self.nombres_features_ = nombres
+        self.n_features_ = X.shape[1]
+        self.clases_, y_cod = np.unique(y, return_inverse=True)
+        self._n_clases = len(self.clases_)
+        self._impureza, self._impureza_conteos = _resolver_criterio(self.criterio)
+
+        self.raiz = self._construir(X, y_cod, profundidad=0)
+        return self
+
+    def _construir(self, X, y, profundidad):
+        conteos = np.bincount(y, minlength=self._n_clases)
+        nodo = Nodo(
+            gini=float(self._impureza_conteos(conteos[None, :])[0]),
+            cantidad_muestras=int(y.size),
+            valor=int(np.argmax(conteos)),
+        )
+
+        # Criterios de parada
+        if (self.max_depth is not None and profundidad >= self.max_depth) \
+                or y.size < self.min_split_samples \
+                or nodo.gini == 0.0:
+            return nodo
+
+        # Probar todas las variables y quedarse con la de mayor ganancia
+        mejor_ganancia, mejor_feature, mejor_umbral = 0.0, None, None
+        for j in range(X.shape[1]):
+            ganancia, umbral = buscar_mejor_information_gain_variable(
+                X[:, j], y, criterio=self._impureza,
+                min_split_samples=self.min_split_samples, n_clases=self._n_clases)
+            if umbral is not None and ganancia > mejor_ganancia:
+                mejor_ganancia, mejor_feature, mejor_umbral = ganancia, j, umbral
+
+        if mejor_feature is None:
+            return nodo
+
+        mascara = X[:, mejor_feature] <= mejor_umbral
+        nodo.feature = mejor_feature
+        nodo.umbral = mejor_umbral
+        nodo.izquierda = self._construir(X[mascara], y[mascara], profundidad + 1)
+        nodo.derecha = self._construir(X[~mascara], y[~mascara], profundidad + 1)
+        return nodo
+
+    # -------------------------------------------------------------- util
+    @staticmethod
+    def _a_matriz(X):
+        nombres = list(X.columns) if hasattr(X, "columns") else None
+        X = np.asarray(X, dtype=float)
+        if X.ndim == 1:
+            X = X.reshape(-1, 1)
+        return X, nombres
