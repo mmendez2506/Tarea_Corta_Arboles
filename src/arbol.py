@@ -1,0 +1,505 @@
+# ==============================
+# Tarea Corta 2 — Árboles de Decisión — Inteligencia Artificial
+# Integrantes: María Felix Mendez Abarca, Cristhian Rivas y Jozafath Perez
+# Descripción: Árbol de decisión hecho desde cero con NumPy. Incluye la clase
+#              Nodo, la clase ArbolDecision (fit y predict) y las funciones de
+#              impureza (Gini y entropía) usadas para escoger los cortes.
+# ==============================
+import time
+
+import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Funciones de impureza
+# ---------------------------------------------------------------------------
+
+def _proporciones(labels):
+    labels = np.asarray(labels)
+    if labels.size == 0:
+        return np.array([])
+    _, conteos = np.unique(labels, return_counts=True)
+    return conteos / labels.size
+
+
+def gini_impurity(labels):
+    """Coeficiente de Gini: 1 - sum(p_i^2)."""
+    p = _proporciones(labels)
+    if p.size == 0:
+        return 0.0
+    return float(1.0 - np.sum(p ** 2))
+
+
+def entropy_impurity(labels):
+    """Entropía: -sum(p_i * log2(p_i))."""
+    p = _proporciones(labels)
+    p = p[p > 0]
+    if p.size == 0:
+        return 0.0
+    return float(-np.sum(p * np.log2(p)))
+
+
+# Versiones que reciben una matriz de conteos (filas = candidatos de corte,
+# columnas = clases). Se usan para evaluar todos los umbrales a la vez.
+
+def _gini_desde_conteos(conteos):
+    n = conteos.sum(axis=-1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p = np.where(n > 0, conteos / n, 0.0)
+    return 1.0 - np.sum(p ** 2, axis=-1)
+
+
+def _entropia_desde_conteos(conteos):
+    n = conteos.sum(axis=-1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p = np.where(n > 0, conteos / n, 0.0)
+        terminos = np.where(p > 0, p * np.log2(p), 0.0)
+    return -np.sum(terminos, axis=-1)
+
+
+_CRITERIOS = {
+    "gini": (gini_impurity, _gini_desde_conteos),
+    "entropia": (entropy_impurity, _entropia_desde_conteos),
+    "entropy": (entropy_impurity, _entropia_desde_conteos),
+}
+_POR_FUNCION = {
+    gini_impurity: _gini_desde_conteos,
+    entropy_impurity: _entropia_desde_conteos,
+}
+
+
+def _resolver_criterio(criterio):
+    """Acepta "gini" / "entropia" o directamente la función de impureza."""
+    if isinstance(criterio, str):
+        clave = criterio.lower()
+        if clave not in _CRITERIOS:
+            raise ValueError(f"Criterio desconocido: {criterio!r}. Use 'gini' o 'entropia'.")
+        return _CRITERIOS[clave]
+    if criterio in _POR_FUNCION:
+        return criterio, _POR_FUNCION[criterio]
+    raise ValueError("criterio debe ser 'gini', 'entropia', gini_impurity o entropy_impurity.")
+
+
+# ---------------------------------------------------------------------------
+# Ganancia de información y búsqueda del mejor umbral
+# ---------------------------------------------------------------------------
+
+def ganancia_informacion(y, y_mask, impurity_func=entropy_impurity):
+    """Ganancia de información de dividir y según y_mask.
+
+    IG = I(padre) - |izq|/n * I(izq) - |der|/n * I(der)
+    (el cuaderno original ponderaba un solo hijo por la proporción de clases).
+    """
+    y = np.asarray(y)
+    y_mask = np.asarray(y_mask, dtype=bool)
+    n = y.size
+    a = int(y_mask.sum())
+    b = n - a
+    if a == 0 or b == 0:
+        return 0.0
+    return (impurity_func(y)
+            - (a / n) * impurity_func(y[y_mask])
+            - (b / n) * impurity_func(y[~y_mask]))
+
+
+def buscar_mejor_information_gain_variable(x, y, criterio=entropy_impurity,
+                                           min_split_samples=2, n_clases=None):
+    """Mejor umbral para una variable numérica.
+
+    Devuelve (max_gain, best_midpoint). Si el nodo tiene menos de
+    min_split_samples muestras, o la variable es constante, devuelve (0.0, None).
+
+    Da el mismo resultado que probar cada punto medio con ganancia_informacion,
+    pero calcula todos los cortes a la vez con sumas acumuladas.
+    y debe venir codificada como enteros 0..k-1 (ArbolDecision lo hace).
+    La división es: izquierda = x <= umbral, derecha = x > umbral.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y)
+    n = x.size
+    if n < min_split_samples or n < 2:
+        return 0.0, None
+
+    _, impureza_conteos = _resolver_criterio(criterio)
+    if n_clases is None:
+        n_clases = int(y.max()) + 1
+
+    orden = np.argsort(x, kind="mergesort")
+    x_ord = x[orden]
+    y_ord = y[orden]
+
+    # Conteos acumulados por clase: fila i = conteos de las primeras i+1 muestras
+    one_hot = np.zeros((n, n_clases))
+    one_hot[np.arange(n), y_ord] = 1
+    acumulado = np.cumsum(one_hot, axis=0)
+    total = acumulado[-1]
+
+    # Cortes válidos: donde cambia el valor de x (entre x_ord[i] y x_ord[i+1])
+    cortes = np.nonzero(x_ord[1:] > x_ord[:-1])[0]
+    if cortes.size == 0:
+        return 0.0, None
+
+    izq = acumulado[cortes]
+    der = total - izq
+    n_izq = cortes + 1
+    n_der = n - n_izq
+
+    impureza_padre = impureza_conteos(total[None, :])[0]
+    ganancias = (impureza_padre
+                 - (n_izq / n) * impureza_conteos(izq)
+                 - (n_der / n) * impureza_conteos(der))
+
+    mejor = int(np.argmax(ganancias))
+    max_gain = float(ganancias[mejor])
+    if max_gain <= 0:
+        return 0.0, None
+    i = cortes[mejor]
+    best_midpoint = float((x_ord[i] + x_ord[i + 1]) / 2)
+    return max_gain, best_midpoint
+
+
+# ---------------------------------------------------------------------------
+# Nodo y árbol
+# ---------------------------------------------------------------------------
+
+class Nodo:
+    """Nodo de un árbol de decisión.
+
+    feature           índice de la variable usada para dividir (None en hojas)
+    umbral            variable numérica: valor de corte (izquierda si x <= umbral).
+                      variable categórica: conjunto de categorías que van a la izquierda.
+    gini              impureza del nodo según el criterio del árbol
+    cantidad_muestras muestras de entrenamiento que llegaron al nodo
+    valor             clase mayoritaria (lo que predice el nodo)
+    izquierda/derecha nodos hijos
+    distribucion      cuántas muestras de cada clase llegaron (para predict_proba)
+    ganancia          ganancia de información del corte (0 en hojas)
+    """
+
+    def __init__(self, feature=None, umbral=None, gini=None,
+                 cantidad_muestras=None, valor=None,
+                 izquierda=None, derecha=None,
+                 distribucion=None, ganancia=0.0):
+        self.feature = feature
+        self.umbral = umbral
+        self.gini = gini
+        self.cantidad_muestras = cantidad_muestras
+        self.valor = valor
+        self.izquierda = izquierda
+        self.derecha = derecha
+        self.distribucion = distribucion
+        self.ganancia = ganancia
+
+    def es_hoja(self):
+        return self.izquierda is None and self.derecha is None
+
+    def va_izquierda(self, x):
+        """Máscara booleana: qué valores de x bajan por la izquierda."""
+        if isinstance(self.umbral, frozenset):
+            return np.isin(x, list(self.umbral))
+        return x <= self.umbral
+
+    def __repr__(self):
+        if self.es_hoja():
+            return f"Hoja(valor={self.valor}, muestras={self.cantidad_muestras}, gini={self.gini:.3f})"
+        umbral = (f"{len(self.umbral)} categorías" if isinstance(self.umbral, frozenset)
+                  else f"{self.umbral:.3f}")
+        return (f"Nodo(feature={self.feature}, umbral={umbral}, "
+                f"muestras={self.cantidad_muestras}, gini={self.gini:.3f})")
+
+
+class ArbolDecision:
+    """Árbol de decisión de clasificación.
+
+    max_depth          cantidad máxima de variables que se pueden explorar en un camino
+                       de la raíz a una hoja, es decir, la profundidad máxima del árbol:
+                       cada nivel evalúa una variable. None = sin límite; la raíz es el nivel 0.
+    min_split_samples  mínimo de muestras que debe tener un nodo para poder dividirse.
+    criterio           "gini", "entropia" o directamente gini_impurity / entropy_impurity.
+
+    Uso:
+        modelo = ArbolDecision(max_depth=5, min_split_samples=20, criterio="gini")
+        modelo.fit(X_train, y_train)
+        y_pred = modelo.predict(X_test)
+
+    X puede ser un arreglo de NumPy numérico o un DataFrame de pandas, incluso con
+    columnas de texto (workclass, education, ...): esas se codifican solas.
+    y puede ser 0/1 o texto ('<=50K' / '>50K'); predict devuelve el mismo tipo.
+    """
+
+    def __init__(self, max_depth=5, min_split_samples=2, criterio="gini"):
+        if max_depth is not None and max_depth < 0:
+            raise ValueError("max_depth debe ser >= 0 o None")
+        if min_split_samples < 2:
+            raise ValueError("min_split_samples debe ser >= 2")
+        _resolver_criterio(criterio)  # falla temprano si el criterio no existe
+        self.max_depth = max_depth
+        self.min_split_samples = min_split_samples
+        self.criterio = criterio
+        self.raiz = None
+        self.clases_ = None
+        self.nombres_features_ = None
+        self.categorias_ = {}
+        self.tiempo_entrenamiento_ = None
+
+    def __repr__(self):
+        return (f"ArbolDecision(max_depth={self.max_depth}, "
+                f"min_split_samples={self.min_split_samples}, criterio={self.criterio!r})")
+
+    # ---------------------------------------------------------------- fit
+    def fit(self, X, y):
+        """Entrena el árbol. Devuelve self para poder encadenar: modelo.fit(X, y).predict(X2)."""
+        inicio = time.perf_counter()
+        y = np.asarray(y).ravel()
+        if len(X) != y.shape[0]:
+            raise ValueError("X y y deben tener la misma cantidad de filas")
+        if y.shape[0] == 0:
+            raise ValueError("No se puede entrenar con 0 muestras")
+
+        self.clases_, y_cod = np.unique(y, return_inverse=True)
+        self._n_clases = len(self.clases_)
+        self._impureza, self._impureza_conteos = _resolver_criterio(self.criterio)
+
+        X = self._preparar_X(X, y_cod=y_cod)
+        self.n_features_ = X.shape[1]
+
+        self.raiz = self._construir(X, y_cod, profundidad=0)
+        self.tiempo_entrenamiento_ = time.perf_counter() - inicio
+        return self
+
+    def _construir(self, X, y, profundidad):
+        conteos = np.bincount(y, minlength=self._n_clases)
+        nodo = Nodo(
+            gini=float(self._impureza_conteos(conteos[None, :])[0]),
+            cantidad_muestras=int(y.size),
+            valor=int(np.argmax(conteos)),
+            distribucion=conteos,
+        )
+
+        # Criterios de parada
+        if (self.max_depth is not None and profundidad >= self.max_depth) \
+                or y.size < self.min_split_samples \
+                or nodo.gini == 0.0:
+            return nodo
+
+        # Probar todas las variables y quedarse con la de mayor ganancia
+        mejor_ganancia, mejor_feature, mejor_umbral = 0.0, None, None
+        for j in range(X.shape[1]):
+            if j in self.categorias_:
+                ganancia, umbral = self._mejor_corte_categorico(X[:, j], y)
+            else:
+                ganancia, umbral = buscar_mejor_information_gain_variable(
+                    X[:, j], y, criterio=self._impureza,
+                    min_split_samples=self.min_split_samples, n_clases=self._n_clases)
+            if umbral is not None and ganancia > mejor_ganancia:
+                mejor_ganancia, mejor_feature, mejor_umbral = ganancia, j, umbral
+
+        if mejor_feature is None:
+            return nodo
+
+        nodo.feature = mejor_feature
+        nodo.umbral = mejor_umbral
+        mascara = nodo.va_izquierda(X[:, mejor_feature])
+        nodo.ganancia = mejor_ganancia
+        nodo.izquierda = self._construir(X[mascara], y[mascara], profundidad + 1)
+        nodo.derecha = self._construir(X[~mascara], y[~mascara], profundidad + 1)
+        return nodo
+
+    def _mejor_corte_categorico(self, x, y):
+        """Mejor partición de las categorías en dos grupos, calculada en ESTE nodo.
+
+        Con dos clases, se ordenan las categorías presentes en el nodo por su
+        proporción de clase positiva y se busca el mejor corte en ese orden. Para
+        Gini y entropía con dos clases, ese corte es la mejor partición posible en
+        dos grupos (resultado clásico de Breiman et al., CART), sin probar las
+        2^(k-1) - 1 combinaciones. Con más de dos clases se usa el orden
+        alfabético, que es solo una aproximación.
+
+        Devuelve (ganancia, frozenset de códigos que van a la izquierda) o (0.0, None).
+        """
+        codigos, inversa = np.unique(x, return_inverse=True)
+        if codigos.size < 2:
+            return 0.0, None
+        if self._n_clases == 2:
+            tasa = np.bincount(inversa, weights=y) / np.bincount(inversa)
+            orden = np.argsort(tasa, kind="mergesort")
+        else:
+            orden = np.arange(codigos.size)
+        rango = np.empty(codigos.size, dtype=int)
+        rango[orden] = np.arange(codigos.size)
+        ganancia, umbral = buscar_mejor_information_gain_variable(
+            rango[inversa], y, criterio=self._impureza,
+            min_split_samples=self.min_split_samples, n_clases=self._n_clases)
+        if umbral is None:
+            return 0.0, None
+        izquierda = codigos[orden[: int(umbral) + 1]]
+        return ganancia, frozenset(int(c) for c in izquierda)
+
+    # ------------------------------------------------------------ predict
+    def predict(self, X):
+        """Clase predicha para cada fila, con las mismas etiquetas que se usaron en fit."""
+        hojas = self._hojas_de(X)
+        return self.clases_[np.array([h.valor for h in hojas], dtype=int)]
+
+    def predict_proba(self, X):
+        """Probabilidad de cada clase por fila (columnas en el orden de clases_)."""
+        hojas = self._hojas_de(X)
+        dist = np.array([h.distribucion for h in hojas], dtype=float)
+        return dist / dist.sum(axis=1, keepdims=True)
+
+    def _hojas_de(self, X):
+        if self.raiz is None:
+            raise RuntimeError("El árbol no ha sido entrenado; llame fit primero")
+        X = self._preparar_X(X)
+        hojas = np.empty(X.shape[0], dtype=object)
+        self._bajar(self.raiz, X, np.arange(X.shape[0]), hojas)
+        return hojas
+
+    def _bajar(self, nodo, X, filas, salida):
+        """Recorre el árbol con máscaras: cada nodo procesa todas sus filas a la vez."""
+        if filas.size == 0:
+            return
+        if nodo.es_hoja():
+            salida[filas] = nodo
+            return
+        va_izq = nodo.va_izquierda(X[filas, nodo.feature])
+        self._bajar(nodo.izquierda, X, filas[va_izq], salida)
+        self._bajar(nodo.derecha, X, filas[~va_izq], salida)
+
+    # ------------------------------------------- variables categóricas
+    def _preparar_X(self, X, y_cod=None):
+        """Convierte X en una matriz float.
+
+        Si X es un DataFrame, en predict las columnas se toman por nombre y en el
+        orden de fit (las columnas extra se ignoran; si falta alguna, da error).
+        Con arreglos de NumPy se usan por posición.
+
+        Las columnas de texto se codifican como números (orden alfabético). Cómo
+        se dividen se decide en cada nodo (ver _mejor_corte_categorico). Una
+        categoría que no apareció en el entrenamiento se codifica como -1 y en
+        predict baja siempre por la derecha.
+        """
+        entrenando = y_cod is not None
+        if hasattr(X, "columns"):
+            if not entrenando and self.nombres_features_ is not None:
+                # Usar las columnas por nombre y en el mismo orden que en fit
+                recibidas = {str(c): c for c in X.columns}
+                faltan = [c for c in self.nombres_features_ if c not in recibidas]
+                if faltan:
+                    raise ValueError(f"Faltan columnas que se usaron en fit: {faltan}")
+                X = X[[recibidas[c] for c in self.nombres_features_]]
+            nombres = [str(c) for c in X.columns]
+            columnas = [X[c].to_numpy() for c in X.columns]
+        else:
+            arr = np.asarray(X)
+            if arr.ndim == 1:
+                arr = arr.reshape(-1, 1)
+            nombres = None
+            columnas = [arr[:, j] for j in range(arr.shape[1])]
+
+        if entrenando:
+            if nombres is not None and len(set(nombres)) != len(nombres):
+                raise ValueError("X tiene nombres de columna repetidos")
+            self.nombres_features_ = nombres
+            self.categorias_ = {}
+        elif len(columnas) != self.n_features_:
+            raise ValueError(f"Se esperaban {self.n_features_} variables, llegaron {len(columnas)}")
+
+        salida = np.empty((len(columnas[0]) if columnas else 0, len(columnas)))
+        for j, col in enumerate(columnas):
+            es_texto = col.dtype.kind in "OUS"
+            if entrenando and es_texto:
+                texto = np.array([str(v).strip() for v in col])
+                cats = np.unique(texto)
+                self.categorias_[j] = {c: i for i, c in enumerate(cats)}
+            if j in self.categorias_:
+                mapa = self.categorias_[j]
+                salida[:, j] = [mapa.get(str(v).strip(), -1) for v in col]
+            else:
+                salida[:, j] = col.astype(float)
+        return salida
+
+    # ------------------------------------------------- info del modelo
+    def profundidad(self):
+        """Niveles reales del árbol entrenado (puede ser menor que max_depth)."""
+        def prof(n):
+            return 0 if n is None or n.es_hoja() else 1 + max(prof(n.izquierda), prof(n.derecha))
+        return prof(self.raiz)
+
+    def cantidad_hojas(self):
+        def hojas(n):
+            if n is None:
+                return 0
+            return 1 if n.es_hoja() else hojas(n.izquierda) + hojas(n.derecha)
+        return hojas(self.raiz)
+
+    def cantidad_nodos(self):
+        def nodos(n):
+            return 0 if n is None else 1 + nodos(n.izquierda) + nodos(n.derecha)
+        return nodos(self.raiz)
+
+    def importancia_variables(self):
+        """Cuánto aportó cada variable a bajar la impureza, normalizado a 1.
+
+        Suma, por variable, la ganancia de cada corte ponderada por la fracción de
+        muestras que llegaron a ese nodo. Devuelve un dict nombre -> importancia,
+        ordenado de mayor a menor.
+        """
+        if self.raiz is None:
+            raise RuntimeError("El árbol no ha sido entrenado; llame fit primero")
+        total = np.zeros(self.n_features_)
+        n_raiz = self.raiz.cantidad_muestras
+        pila = [self.raiz]
+        while pila:
+            n = pila.pop()
+            if not n.es_hoja():
+                total[n.feature] += n.ganancia * n.cantidad_muestras / n_raiz
+                pila += [n.izquierda, n.derecha]
+        if total.sum() > 0:
+            total = total / total.sum()
+        orden = np.argsort(-total, kind="mergesort")
+        return {self._nombre(j): float(total[j]) for j in orden}
+
+    def resumen(self):
+        """Hiperparámetros + complejidad + tiempo, listo para una tabla de resultados."""
+        return {**self.get_params(),
+                "profundidad_real": self.profundidad(),
+                "hojas": self.cantidad_hojas(),
+                "nodos": self.cantidad_nodos(),
+                "tiempo_entrenamiento_s": round(self.tiempo_entrenamiento_, 3)}
+
+    def imprimir(self, max_niveles=None):
+        """Muestra el árbol como texto. max_niveles corta la impresión en ese nivel."""
+        lineas = []
+
+        def condicion(n):
+            if n.feature in self.categorias_:
+                izq = [c for c, i in self.categorias_[n.feature].items() if i in n.umbral]
+                lista = ", ".join(izq[:4]) + (", …" if len(izq) > 4 else "")
+                return f"{self._nombre(n.feature)} en {{{lista}}}"
+            return f"{self._nombre(n.feature)} <= {n.umbral:.3f}"
+
+        def rec(n, nivel, prefijo):
+            sangria = "    " * nivel
+            info = f"(muestras={n.cantidad_muestras}, impureza={n.gini:.3f})"
+            if n.es_hoja() or (max_niveles is not None and nivel >= max_niveles):
+                lineas.append(f"{sangria}{prefijo}clase={self.clases_[n.valor]} {info}")
+                return
+            lineas.append(f"{sangria}{prefijo}{condicion(n)} {info}")
+            rec(n.izquierda, nivel + 1, "sí: ")
+            rec(n.derecha, nivel + 1, "no: ")
+
+        rec(self.raiz, 0, "")
+        print("\n".join(lineas))
+
+    def get_params(self):
+        return {"max_depth": self.max_depth,
+                "min_split_samples": self.min_split_samples,
+                "criterio": self.criterio}
+
+    def clonar(self):
+        """Árbol nuevo, sin entrenar, con los mismos hiperparámetros (útil en validación cruzada)."""
+        return ArbolDecision(**self.get_params())
+
+    def _nombre(self, j):
+        return self.nombres_features_[j] if self.nombres_features_ else f"x[{j}]"
