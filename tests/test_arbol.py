@@ -117,6 +117,20 @@ def test_errores_claros():
         raise AssertionError("predict sin fit debería fallar")
 
 
+def test_predict_usa_columnas_por_nombre():
+    rng = np.random.default_rng(3)
+    df = pd.DataFrame({"age": rng.integers(17, 90, 300), "hours": rng.integers(1, 99, 300)})
+    y = (df["age"] > 40).astype(int).to_numpy()
+    modelo = ArbolDecision(max_depth=3).fit(df, y)
+    assert (modelo.predict(df[["hours", "age"]]) == modelo.predict(df)).all()
+    try:
+        modelo.predict(df[["hours"]])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Debería fallar si falta una columna")
+
+
 if __name__ == "__main__":
     pruebas = [f for nombre, f in sorted(globals().items()) if nombre.startswith("test_")]
     for prueba in pruebas:

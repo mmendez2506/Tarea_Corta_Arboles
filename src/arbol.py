@@ -328,6 +328,10 @@ class ArbolDecision:
     def _preparar_X(self, X, y_cod=None):
         """Convierte X en una matriz float.
 
+        Si X es un DataFrame, en predict las columnas se toman por nombre y en el
+        orden de fit (las columnas extra se ignoran; si falta alguna, da error).
+        Con arreglos de NumPy se usan por posición.
+
         Las columnas de texto se codifican como números. En fit (y_cod dado) las
         categorías se ordenan por la proporción de la clase positiva: así un corte
         x <= umbral separa "categorías con poca clase positiva" de "con mucha", que
@@ -336,6 +340,13 @@ class ArbolDecision:
         """
         entrenando = y_cod is not None
         if hasattr(X, "columns"):
+            if not entrenando and self.nombres_features_ is not None:
+                # Usar las columnas por nombre y en el mismo orden que en fit
+                recibidas = {str(c): c for c in X.columns}
+                faltan = [c for c in self.nombres_features_ if c not in recibidas]
+                if faltan:
+                    raise ValueError(f"Faltan columnas que se usaron en fit: {faltan}")
+                X = X[[recibidas[c] for c in self.nombres_features_]]
             nombres = [str(c) for c in X.columns]
             columnas = [X[c].to_numpy() for c in X.columns]
         else:
@@ -346,6 +357,8 @@ class ArbolDecision:
             columnas = [arr[:, j] for j in range(arr.shape[1])]
 
         if entrenando:
+            if nombres is not None and len(set(nombres)) != len(nombres):
+                raise ValueError("X tiene nombres de columna repetidos")
             self.nombres_features_ = nombres
             self.categorias_ = {}
         elif len(columnas) != self.n_features_:

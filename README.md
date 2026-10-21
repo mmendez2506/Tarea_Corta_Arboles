@@ -31,6 +31,8 @@ y_pred = modelo.predict(X_test)
 
 - **`X`** puede ser el DataFrame tal cual, con las columnas de texto (`workclass`, `education`, …). El árbol las codifica solo y quita los espacios. No hace falta one-hot ni codificar a mano.
 - **`y`** puede ser 0/1 o texto. `predict` devuelve el mismo tipo que recibió.
+- Si `X` es DataFrame, `predict` toma las columnas **por nombre** y en el orden de `fit`: no importa el orden en que lleguen, pero no puede faltar ninguna.
+- Las categorías se dividen en dos grupos y el mejor agrupamiento se recalcula en cada nodo.
 - **`max_depth`**: cantidad máxima de variables que se exploran de la raíz a una hoja (= profundidad). `None` es sin límite.
 - **`min_split_samples`**: mínimo de muestras para que un nodo se pueda dividir (≥ 2).
 
