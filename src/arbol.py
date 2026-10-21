@@ -200,6 +200,15 @@ class ArbolDecision:
                        cada nivel evalúa una variable. None = sin límite; la raíz es el nivel 0.
     min_split_samples  mínimo de muestras que debe tener un nodo para poder dividirse.
     criterio           "gini", "entropia" o directamente gini_impurity / entropy_impurity.
+
+    Uso:
+        modelo = ArbolDecision(max_depth=5, min_split_samples=20, criterio="gini")
+        modelo.fit(X_train, y_train)
+        y_pred = modelo.predict(X_test)
+
+    X puede ser un arreglo de NumPy numérico o un DataFrame de pandas, incluso con
+    columnas de texto (workclass, education, ...): esas se codifican solas.
+    y puede ser 0/1 o texto ('<=50K' / '>50K'); predict devuelve el mismo tipo.
     """
 
     def __init__(self, max_depth=5, min_split_samples=2, criterio="gini"):
@@ -207,27 +216,30 @@ class ArbolDecision:
             raise ValueError("max_depth debe ser >= 0 o None")
         if min_split_samples < 2:
             raise ValueError("min_split_samples debe ser >= 2")
+        _resolver_criterio(criterio)  # falla temprano si el criterio no existe
         self.max_depth = max_depth
         self.min_split_samples = min_split_samples
         self.criterio = criterio
         self.raiz = None
         self.clases_ = None
         self.nombres_features_ = None
+        self.categorias_ = {}
 
     # ---------------------------------------------------------------- fit
     def fit(self, X, y):
-        X, nombres = self._a_matriz(X)
+        """Entrena el árbol. Devuelve self para poder encadenar: modelo.fit(X, y).predict(X2)."""
         y = np.asarray(y).ravel()
-        if X.shape[0] != y.shape[0]:
+        if len(X) != y.shape[0]:
             raise ValueError("X y y deben tener la misma cantidad de filas")
-        if X.shape[0] == 0:
+        if y.shape[0] == 0:
             raise ValueError("No se puede entrenar con 0 muestras")
 
-        self.nombres_features_ = nombres
-        self.n_features_ = X.shape[1]
         self.clases_, y_cod = np.unique(y, return_inverse=True)
         self._n_clases = len(self.clases_)
         self._impureza, self._impureza_conteos = _resolver_criterio(self.criterio)
+
+        X = self._preparar_X(X, y_cod=y_cod)
+        self.n_features_ = X.shape[1]
 
         self.raiz = self._construir(X, y_cod, profundidad=0)
         return self
@@ -267,11 +279,10 @@ class ArbolDecision:
 
     # ------------------------------------------------------------ predict
     def predict(self, X):
+        """Clase predicha para cada fila, con las mismas etiquetas que se usaron en fit."""
         if self.raiz is None:
             raise RuntimeError("El árbol no ha sido entrenado; llame fit primero")
-        X, _ = self._a_matriz(X)
-        if X.shape[1] != self.n_features_:
-            raise ValueError(f"Se esperaban {self.n_features_} variables, llegaron {X.shape[1]}")
+        X = self._preparar_X(X)
         indices = np.empty(X.shape[0], dtype=int)
         self._predecir(self.raiz, X, np.arange(X.shape[0]), indices)
         return self.clases_[indices]
@@ -287,8 +298,53 @@ class ArbolDecision:
         self._predecir(nodo.izquierda, X, filas[va_izq], salida)
         self._predecir(nodo.derecha, X, filas[~va_izq], salida)
 
-    # ------------------------------------------------- info de complejidad
+    # ------------------------------------------- variables categóricas
+    def _preparar_X(self, X, y_cod=None):
+        """Convierte X en una matriz float.
+
+        Las columnas de texto se codifican como números. En fit (y_cod dado) las
+        categorías se ordenan por la proporción de la clase positiva: así un corte
+        x <= umbral separa "categorías con poca clase positiva" de "con mucha", que
+        para dos clases es la mejor partición posible de las categorías. Categorías
+        que no aparecieron en el entrenamiento se codifican como -1.
+        """
+        entrenando = y_cod is not None
+        if hasattr(X, "columns"):
+            nombres = [str(c) for c in X.columns]
+            columnas = [X[c].to_numpy() for c in X.columns]
+        else:
+            arr = np.asarray(X)
+            if arr.ndim == 1:
+                arr = arr.reshape(-1, 1)
+            nombres = None
+            columnas = [arr[:, j] for j in range(arr.shape[1])]
+
+        if entrenando:
+            self.nombres_features_ = nombres
+            self.categorias_ = {}
+        elif len(columnas) != self.n_features_:
+            raise ValueError(f"Se esperaban {self.n_features_} variables, llegaron {len(columnas)}")
+
+        salida = np.empty((len(columnas[0]) if columnas else 0, len(columnas)))
+        for j, col in enumerate(columnas):
+            es_texto = col.dtype.kind in "OUS"
+            if entrenando and es_texto:
+                texto = np.array([str(v).strip() for v in col])
+                cats = np.unique(texto)
+                if self._n_clases == 2:
+                    tasa = np.array([y_cod[texto == c].mean() for c in cats])
+                    cats = cats[np.argsort(tasa, kind="mergesort")]
+                self.categorias_[j] = {c: i for i, c in enumerate(cats)}
+            if j in self.categorias_:
+                mapa = self.categorias_[j]
+                salida[:, j] = [mapa.get(str(v).strip(), -1) for v in col]
+            else:
+                salida[:, j] = col.astype(float)
+        return salida
+
+    # ------------------------------------------------- info del modelo
     def profundidad(self):
+        """Niveles reales del árbol entrenado (puede ser menor que max_depth)."""
         def prof(n):
             return 0 if n is None or n.es_hoja() else 1 + max(prof(n.izquierda), prof(n.derecha))
         return prof(self.raiz)
@@ -301,20 +357,23 @@ class ArbolDecision:
         return hojas(self.raiz)
 
     def imprimir(self, max_niveles=None):
-        """Muestra el árbol como texto (útil para el análisis)."""
+        """Muestra el árbol como texto. max_niveles corta la impresión en ese nivel."""
         lineas = []
 
-        def nombre(j):
-            return self.nombres_features_[j] if self.nombres_features_ else f"x[{j}]"
+        def condicion(n):
+            if n.feature in self.categorias_:
+                izq = [c for c, i in self.categorias_[n.feature].items() if i <= n.umbral]
+                lista = ", ".join(izq[:4]) + (", …" if len(izq) > 4 else "")
+                return f"{self._nombre(n.feature)} en {{{lista}}}"
+            return f"{self._nombre(n.feature)} <= {n.umbral:.3f}"
 
         def rec(n, nivel, prefijo):
             sangria = "    " * nivel
+            info = f"(muestras={n.cantidad_muestras}, impureza={n.gini:.3f})"
             if n.es_hoja() or (max_niveles is not None and nivel >= max_niveles):
-                lineas.append(f"{sangria}{prefijo}clase={self.clases_[n.valor]} "
-                              f"(muestras={n.cantidad_muestras}, impureza={n.gini:.3f})")
+                lineas.append(f"{sangria}{prefijo}clase={self.clases_[n.valor]} {info}")
                 return
-            lineas.append(f"{sangria}{prefijo}{nombre(n.feature)} <= {n.umbral:.3f} "
-                          f"(muestras={n.cantidad_muestras}, impureza={n.gini:.3f})")
+            lineas.append(f"{sangria}{prefijo}{condicion(n)} {info}")
             rec(n.izquierda, nivel + 1, "sí: ")
             rec(n.derecha, nivel + 1, "no: ")
 
@@ -326,11 +385,5 @@ class ArbolDecision:
                 "min_split_samples": self.min_split_samples,
                 "criterio": self.criterio}
 
-    # -------------------------------------------------------------- util
-    @staticmethod
-    def _a_matriz(X):
-        nombres = list(X.columns) if hasattr(X, "columns") else None
-        X = np.asarray(X, dtype=float)
-        if X.ndim == 1:
-            X = X.reshape(-1, 1)
-        return X, nombres
+    def _nombre(self, j):
+        return self.nombres_features_[j] if self.nombres_features_ else f"x[{j}]"
