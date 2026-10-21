@@ -265,6 +265,28 @@ class ArbolDecision:
         nodo.derecha = self._construir(X[~mascara], y[~mascara], profundidad + 1)
         return nodo
 
+    # ------------------------------------------------------------ predict
+    def predict(self, X):
+        if self.raiz is None:
+            raise RuntimeError("El árbol no ha sido entrenado; llame fit primero")
+        X, _ = self._a_matriz(X)
+        if X.shape[1] != self.n_features_:
+            raise ValueError(f"Se esperaban {self.n_features_} variables, llegaron {X.shape[1]}")
+        indices = np.empty(X.shape[0], dtype=int)
+        self._predecir(self.raiz, X, np.arange(X.shape[0]), indices)
+        return self.clases_[indices]
+
+    def _predecir(self, nodo, X, filas, salida):
+        """Recorre el árbol con máscaras: cada nodo procesa todas sus filas a la vez."""
+        if filas.size == 0:
+            return
+        if nodo.es_hoja():
+            salida[filas] = nodo.valor
+            return
+        va_izq = X[filas, nodo.feature] <= nodo.umbral
+        self._predecir(nodo.izquierda, X, filas[va_izq], salida)
+        self._predecir(nodo.derecha, X, filas[~va_izq], salida)
+
     # -------------------------------------------------------------- util
     @staticmethod
     def _a_matriz(X):
