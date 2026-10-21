@@ -287,6 +287,45 @@ class ArbolDecision:
         self._predecir(nodo.izquierda, X, filas[va_izq], salida)
         self._predecir(nodo.derecha, X, filas[~va_izq], salida)
 
+    # ------------------------------------------------- info de complejidad
+    def profundidad(self):
+        def prof(n):
+            return 0 if n is None or n.es_hoja() else 1 + max(prof(n.izquierda), prof(n.derecha))
+        return prof(self.raiz)
+
+    def cantidad_hojas(self):
+        def hojas(n):
+            if n is None:
+                return 0
+            return 1 if n.es_hoja() else hojas(n.izquierda) + hojas(n.derecha)
+        return hojas(self.raiz)
+
+    def imprimir(self, max_niveles=None):
+        """Muestra el árbol como texto (útil para el análisis)."""
+        lineas = []
+
+        def nombre(j):
+            return self.nombres_features_[j] if self.nombres_features_ else f"x[{j}]"
+
+        def rec(n, nivel, prefijo):
+            sangria = "    " * nivel
+            if n.es_hoja() or (max_niveles is not None and nivel >= max_niveles):
+                lineas.append(f"{sangria}{prefijo}clase={self.clases_[n.valor]} "
+                              f"(muestras={n.cantidad_muestras}, impureza={n.gini:.3f})")
+                return
+            lineas.append(f"{sangria}{prefijo}{nombre(n.feature)} <= {n.umbral:.3f} "
+                          f"(muestras={n.cantidad_muestras}, impureza={n.gini:.3f})")
+            rec(n.izquierda, nivel + 1, "sí: ")
+            rec(n.derecha, nivel + 1, "no: ")
+
+        rec(self.raiz, 0, "")
+        print("\n".join(lineas))
+
+    def get_params(self):
+        return {"max_depth": self.max_depth,
+                "min_split_samples": self.min_split_samples,
+                "criterio": self.criterio}
+
     # -------------------------------------------------------------- util
     @staticmethod
     def _a_matriz(X):
