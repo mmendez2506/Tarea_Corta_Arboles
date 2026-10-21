@@ -166,7 +166,8 @@ class Nodo:
     """Nodo de un árbol de decisión.
 
     feature           índice de la variable usada para dividir (None en hojas)
-    umbral            valor de corte: izquierda si x <= umbral, derecha si x > umbral
+    umbral            variable numérica: valor de corte (izquierda si x <= umbral).
+                      variable categórica: conjunto de categorías que van a la izquierda.
     gini              impureza del nodo según el criterio del árbol
     cantidad_muestras muestras de entrenamiento que llegaron al nodo
     valor             clase mayoritaria (lo que predice el nodo)
@@ -192,10 +193,18 @@ class Nodo:
     def es_hoja(self):
         return self.izquierda is None and self.derecha is None
 
+    def va_izquierda(self, x):
+        """Máscara booleana: qué valores de x bajan por la izquierda."""
+        if isinstance(self.umbral, frozenset):
+            return np.isin(x, list(self.umbral))
+        return x <= self.umbral
+
     def __repr__(self):
         if self.es_hoja():
             return f"Hoja(valor={self.valor}, muestras={self.cantidad_muestras}, gini={self.gini:.3f})"
-        return (f"Nodo(feature={self.feature}, umbral={self.umbral:.3f}, "
+        umbral = (f"{len(self.umbral)} categorías" if isinstance(self.umbral, frozenset)
+                  else f"{self.umbral:.3f}")
+        return (f"Nodo(feature={self.feature}, umbral={umbral}, "
                 f"muestras={self.cantidad_muestras}, gini={self.gini:.3f})")
 
 
@@ -276,22 +285,55 @@ class ArbolDecision:
         # Probar todas las variables y quedarse con la de mayor ganancia
         mejor_ganancia, mejor_feature, mejor_umbral = 0.0, None, None
         for j in range(X.shape[1]):
-            ganancia, umbral = buscar_mejor_information_gain_variable(
-                X[:, j], y, criterio=self._impureza,
-                min_split_samples=self.min_split_samples, n_clases=self._n_clases)
+            if j in self.categorias_:
+                ganancia, umbral = self._mejor_corte_categorico(X[:, j], y)
+            else:
+                ganancia, umbral = buscar_mejor_information_gain_variable(
+                    X[:, j], y, criterio=self._impureza,
+                    min_split_samples=self.min_split_samples, n_clases=self._n_clases)
             if umbral is not None and ganancia > mejor_ganancia:
                 mejor_ganancia, mejor_feature, mejor_umbral = ganancia, j, umbral
 
         if mejor_feature is None:
             return nodo
 
-        mascara = X[:, mejor_feature] <= mejor_umbral
         nodo.feature = mejor_feature
         nodo.umbral = mejor_umbral
+        mascara = nodo.va_izquierda(X[:, mejor_feature])
         nodo.ganancia = mejor_ganancia
         nodo.izquierda = self._construir(X[mascara], y[mascara], profundidad + 1)
         nodo.derecha = self._construir(X[~mascara], y[~mascara], profundidad + 1)
         return nodo
+
+    def _mejor_corte_categorico(self, x, y):
+        """Mejor partición de las categorías en dos grupos, calculada en ESTE nodo.
+
+        Con dos clases, se ordenan las categorías presentes en el nodo por su
+        proporción de clase positiva y se busca el mejor corte en ese orden. Para
+        Gini y entropía con dos clases, ese corte es la mejor partición posible en
+        dos grupos (resultado clásico de Breiman et al., CART), sin probar las
+        2^(k-1) - 1 combinaciones. Con más de dos clases se usa el orden
+        alfabético, que es solo una aproximación.
+
+        Devuelve (ganancia, frozenset de códigos que van a la izquierda) o (0.0, None).
+        """
+        codigos, inversa = np.unique(x, return_inverse=True)
+        if codigos.size < 2:
+            return 0.0, None
+        if self._n_clases == 2:
+            tasa = np.bincount(inversa, weights=y) / np.bincount(inversa)
+            orden = np.argsort(tasa, kind="mergesort")
+        else:
+            orden = np.arange(codigos.size)
+        rango = np.empty(codigos.size, dtype=int)
+        rango[orden] = np.arange(codigos.size)
+        ganancia, umbral = buscar_mejor_information_gain_variable(
+            rango[inversa], y, criterio=self._impureza,
+            min_split_samples=self.min_split_samples, n_clases=self._n_clases)
+        if umbral is None:
+            return 0.0, None
+        izquierda = codigos[orden[: int(umbral) + 1]]
+        return ganancia, frozenset(int(c) for c in izquierda)
 
     # ------------------------------------------------------------ predict
     def predict(self, X):
@@ -320,7 +362,7 @@ class ArbolDecision:
         if nodo.es_hoja():
             salida[filas] = nodo
             return
-        va_izq = X[filas, nodo.feature] <= nodo.umbral
+        va_izq = nodo.va_izquierda(X[filas, nodo.feature])
         self._bajar(nodo.izquierda, X, filas[va_izq], salida)
         self._bajar(nodo.derecha, X, filas[~va_izq], salida)
 
@@ -332,11 +374,10 @@ class ArbolDecision:
         orden de fit (las columnas extra se ignoran; si falta alguna, da error).
         Con arreglos de NumPy se usan por posición.
 
-        Las columnas de texto se codifican como números. En fit (y_cod dado) las
-        categorías se ordenan por la proporción de la clase positiva: así un corte
-        x <= umbral separa "categorías con poca clase positiva" de "con mucha", que
-        para dos clases es la mejor partición posible de las categorías. Categorías
-        que no aparecieron en el entrenamiento se codifican como -1.
+        Las columnas de texto se codifican como números (orden alfabético). Cómo
+        se dividen se decide en cada nodo (ver _mejor_corte_categorico). Una
+        categoría que no apareció en el entrenamiento se codifica como -1 y en
+        predict baja siempre por la derecha.
         """
         entrenando = y_cod is not None
         if hasattr(X, "columns"):
@@ -370,9 +411,6 @@ class ArbolDecision:
             if entrenando and es_texto:
                 texto = np.array([str(v).strip() for v in col])
                 cats = np.unique(texto)
-                if self._n_clases == 2:
-                    tasa = np.array([y_cod[texto == c].mean() for c in cats])
-                    cats = cats[np.argsort(tasa, kind="mergesort")]
                 self.categorias_[j] = {c: i for i, c in enumerate(cats)}
             if j in self.categorias_:
                 mapa = self.categorias_[j]
@@ -436,7 +474,7 @@ class ArbolDecision:
 
         def condicion(n):
             if n.feature in self.categorias_:
-                izq = [c for c, i in self.categorias_[n.feature].items() if i <= n.umbral]
+                izq = [c for c, i in self.categorias_[n.feature].items() if i in n.umbral]
                 lista = ", ".join(izq[:4]) + (", …" if len(izq) > 4 else "")
                 return f"{self._nombre(n.feature)} en {{{lista}}}"
             return f"{self._nombre(n.feature)} <= {n.umbral:.3f}"

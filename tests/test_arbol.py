@@ -131,6 +131,40 @@ def test_predict_usa_columnas_por_nombre():
         raise AssertionError("Debería fallar si falta una columna")
 
 
+def test_corte_categorico_es_la_mejor_particion():
+    from itertools import combinations
+    rng = np.random.default_rng(4)
+    cats = np.array(list("ABCDEF"))
+    for _ in range(20):
+        x = rng.choice(cats, 200)
+        prob = dict(zip(cats, rng.random(6)))
+        y = (rng.random(200) < np.vectorize(prob.get)(x)).astype(int)
+        modelo = ArbolDecision(max_depth=1).fit(pd.DataFrame({"c": x}), y)
+        ganancia_arbol = modelo.raiz.ganancia if not modelo.raiz.es_hoja() else 0.0
+        mejor = 0.0
+        presentes = list(np.unique(x))
+        for k in range(1, len(presentes)):
+            for grupo in combinations(presentes, k):
+                mejor = max(mejor, ganancia_informacion(y, np.isin(x, grupo), gini_impurity))
+        assert abs(ganancia_arbol - mejor) < 1e-12
+
+
+def test_orden_categorico_se_recalcula_en_cada_nodo():
+    # La raíz se divide por "a". En la rama a=0, X y Z son positivas e Y negativa;
+    # en la rama a=1 es al revés. Con todos los datos las tres categorías tienen
+    # la misma proporción, así que un orden global (X, Y, Z) deja a Y en medio y
+    # un solo corte no separa {X, Z} de {Y}. Recalculando el orden en cada nodo,
+    # max_depth=2 alcanza para clasificar todo bien.
+    def bloque(a, c, clase, n):
+        return [(a, c, clase)] * n
+    filas = (bloque(0, "X", 1, 100) + bloque(0, "Y", 0, 20) + bloque(0, "Z", 1, 100)
+             + bloque(1, "X", 0, 100) + bloque(1, "Y", 1, 20) + bloque(1, "Z", 0, 100))
+    df = pd.DataFrame(filas, columns=["a", "c", "y"])
+    y = df.pop("y").to_numpy()
+    modelo = ArbolDecision(max_depth=2).fit(df, y)
+    assert modelo.nombres_features_[modelo.raiz.feature] == "a"
+    assert (modelo.predict(df) == y).all()
+
 if __name__ == "__main__":
     pruebas = [f for nombre, f in sorted(globals().items()) if nombre.startswith("test_")]
     for prueba in pruebas:
