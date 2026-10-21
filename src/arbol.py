@@ -5,6 +5,8 @@
 #              Nodo, la clase ArbolDecision (fit y predict) y las funciones de
 #              impureza (Gini y entropía) usadas para escoger los cortes.
 # ==============================
+import time
+
 import numpy as np
 
 
@@ -169,11 +171,14 @@ class Nodo:
     cantidad_muestras muestras de entrenamiento que llegaron al nodo
     valor             clase mayoritaria (lo que predice el nodo)
     izquierda/derecha nodos hijos
+    distribucion      cuántas muestras de cada clase llegaron (para predict_proba)
+    ganancia          ganancia de información del corte (0 en hojas)
     """
 
     def __init__(self, feature=None, umbral=None, gini=None,
                  cantidad_muestras=None, valor=None,
-                 izquierda=None, derecha=None):
+                 izquierda=None, derecha=None,
+                 distribucion=None, ganancia=0.0):
         self.feature = feature
         self.umbral = umbral
         self.gini = gini
@@ -181,6 +186,8 @@ class Nodo:
         self.valor = valor
         self.izquierda = izquierda
         self.derecha = derecha
+        self.distribucion = distribucion
+        self.ganancia = ganancia
 
     def es_hoja(self):
         return self.izquierda is None and self.derecha is None
@@ -224,10 +231,16 @@ class ArbolDecision:
         self.clases_ = None
         self.nombres_features_ = None
         self.categorias_ = {}
+        self.tiempo_entrenamiento_ = None
+
+    def __repr__(self):
+        return (f"ArbolDecision(max_depth={self.max_depth}, "
+                f"min_split_samples={self.min_split_samples}, criterio={self.criterio!r})")
 
     # ---------------------------------------------------------------- fit
     def fit(self, X, y):
         """Entrena el árbol. Devuelve self para poder encadenar: modelo.fit(X, y).predict(X2)."""
+        inicio = time.perf_counter()
         y = np.asarray(y).ravel()
         if len(X) != y.shape[0]:
             raise ValueError("X y y deben tener la misma cantidad de filas")
@@ -242,6 +255,7 @@ class ArbolDecision:
         self.n_features_ = X.shape[1]
 
         self.raiz = self._construir(X, y_cod, profundidad=0)
+        self.tiempo_entrenamiento_ = time.perf_counter() - inicio
         return self
 
     def _construir(self, X, y, profundidad):
@@ -250,6 +264,7 @@ class ArbolDecision:
             gini=float(self._impureza_conteos(conteos[None, :])[0]),
             cantidad_muestras=int(y.size),
             valor=int(np.argmax(conteos)),
+            distribucion=conteos,
         )
 
         # Criterios de parada
@@ -273,6 +288,7 @@ class ArbolDecision:
         mascara = X[:, mejor_feature] <= mejor_umbral
         nodo.feature = mejor_feature
         nodo.umbral = mejor_umbral
+        nodo.ganancia = mejor_ganancia
         nodo.izquierda = self._construir(X[mascara], y[mascara], profundidad + 1)
         nodo.derecha = self._construir(X[~mascara], y[~mascara], profundidad + 1)
         return nodo
@@ -280,23 +296,33 @@ class ArbolDecision:
     # ------------------------------------------------------------ predict
     def predict(self, X):
         """Clase predicha para cada fila, con las mismas etiquetas que se usaron en fit."""
+        hojas = self._hojas_de(X)
+        return self.clases_[np.array([h.valor for h in hojas], dtype=int)]
+
+    def predict_proba(self, X):
+        """Probabilidad de cada clase por fila (columnas en el orden de clases_)."""
+        hojas = self._hojas_de(X)
+        dist = np.array([h.distribucion for h in hojas], dtype=float)
+        return dist / dist.sum(axis=1, keepdims=True)
+
+    def _hojas_de(self, X):
         if self.raiz is None:
             raise RuntimeError("El árbol no ha sido entrenado; llame fit primero")
         X = self._preparar_X(X)
-        indices = np.empty(X.shape[0], dtype=int)
-        self._predecir(self.raiz, X, np.arange(X.shape[0]), indices)
-        return self.clases_[indices]
+        hojas = np.empty(X.shape[0], dtype=object)
+        self._bajar(self.raiz, X, np.arange(X.shape[0]), hojas)
+        return hojas
 
-    def _predecir(self, nodo, X, filas, salida):
+    def _bajar(self, nodo, X, filas, salida):
         """Recorre el árbol con máscaras: cada nodo procesa todas sus filas a la vez."""
         if filas.size == 0:
             return
         if nodo.es_hoja():
-            salida[filas] = nodo.valor
+            salida[filas] = nodo
             return
         va_izq = X[filas, nodo.feature] <= nodo.umbral
-        self._predecir(nodo.izquierda, X, filas[va_izq], salida)
-        self._predecir(nodo.derecha, X, filas[~va_izq], salida)
+        self._bajar(nodo.izquierda, X, filas[va_izq], salida)
+        self._bajar(nodo.derecha, X, filas[~va_izq], salida)
 
     # ------------------------------------------- variables categóricas
     def _preparar_X(self, X, y_cod=None):
@@ -356,6 +382,41 @@ class ArbolDecision:
             return 1 if n.es_hoja() else hojas(n.izquierda) + hojas(n.derecha)
         return hojas(self.raiz)
 
+    def cantidad_nodos(self):
+        def nodos(n):
+            return 0 if n is None else 1 + nodos(n.izquierda) + nodos(n.derecha)
+        return nodos(self.raiz)
+
+    def importancia_variables(self):
+        """Cuánto aportó cada variable a bajar la impureza, normalizado a 1.
+
+        Suma, por variable, la ganancia de cada corte ponderada por la fracción de
+        muestras que llegaron a ese nodo. Devuelve un dict nombre -> importancia,
+        ordenado de mayor a menor.
+        """
+        if self.raiz is None:
+            raise RuntimeError("El árbol no ha sido entrenado; llame fit primero")
+        total = np.zeros(self.n_features_)
+        n_raiz = self.raiz.cantidad_muestras
+        pila = [self.raiz]
+        while pila:
+            n = pila.pop()
+            if not n.es_hoja():
+                total[n.feature] += n.ganancia * n.cantidad_muestras / n_raiz
+                pila += [n.izquierda, n.derecha]
+        if total.sum() > 0:
+            total = total / total.sum()
+        orden = np.argsort(-total, kind="mergesort")
+        return {self._nombre(j): float(total[j]) for j in orden}
+
+    def resumen(self):
+        """Hiperparámetros + complejidad + tiempo, listo para una tabla de resultados."""
+        return {**self.get_params(),
+                "profundidad_real": self.profundidad(),
+                "hojas": self.cantidad_hojas(),
+                "nodos": self.cantidad_nodos(),
+                "tiempo_entrenamiento_s": round(self.tiempo_entrenamiento_, 3)}
+
     def imprimir(self, max_niveles=None):
         """Muestra el árbol como texto. max_niveles corta la impresión en ese nivel."""
         lineas = []
@@ -384,6 +445,10 @@ class ArbolDecision:
         return {"max_depth": self.max_depth,
                 "min_split_samples": self.min_split_samples,
                 "criterio": self.criterio}
+
+    def clonar(self):
+        """Árbol nuevo, sin entrenar, con los mismos hiperparámetros (útil en validación cruzada)."""
+        return ArbolDecision(**self.get_params())
 
     def _nombre(self, j):
         return self.nombres_features_[j] if self.nombres_features_ else f"x[{j}]"
