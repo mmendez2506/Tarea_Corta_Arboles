@@ -15,9 +15,10 @@
 | `experimentos.py` | Persona C | Las 10 combinaciones de hiperparámetros |
 | `taller.ipynb` | Persona C | Resultados, análisis y evaluación en test |
 | `tests/test_arbol.py` | Persona A | Pruebas del árbol |
+| `tests/test_evaluacion.py` | Persona B | Pruebas de datos, métricas y validación cruzada |
 | `data/adult-census.csv` | — | Dataset del taller |
 
-Correr las pruebas desde la raíz del repo: `python -m tests.test_arbol`
+Correr las pruebas desde la raíz del repo: `python -m tests.test_arbol` y `python -m tests.test_evaluacion`
 
 ## Cómo usar el árbol
 
@@ -38,22 +39,26 @@ y_pred = modelo.predict(X_test)
 
 Con el dataset completo entrena en menos de 1 s con profundidad limitada y unos 4 s sin límite.
 
-### Para la Persona B (datos y evaluación)
-
-`cargar_datos` solo necesita separar la clase y pasarla a 0/1:
+## Datos y evaluación
 
 ```python
-df = pd.read_csv(ruta)
-y = (df["class"].str.strip() == ">50K").astype(int).to_numpy()   # 1 = gana más de 50K
-X = df.drop(columns="class")                                      # el árbol acepta el texto
+from src.datos import cargar_datos, train_test_split_manual
+from src.evaluacion import validacion_cruzada, f1
+
+X, y = cargar_datos()                                   # X: DataFrame, y: NumPy 0/1 (1 = >50K)
+X_train, X_test, y_train, y_test = train_test_split_manual(X, y, test_size=0.2)   # SEMILLA = 42
+cv = validacion_cruzada(ArbolDecision, {"max_depth": 10, "min_split_samples": 300, "criterio": "gini"},
+                        X_train, y_train, k=5)
 ```
 
-En `validacion_cruzada`, entrenar un modelo nuevo por fold:
+- `cargar_datos` quita el espacio inicial de las etiquetas y del texto, y pasa la clase a 0/1. Los `?` quedan como una categoría más. Las categóricas se dejan como texto porque el árbol las agrupa mejor que un ordinal o un one-hot (F1 0.667 contra 0.644 y 0.660 en validación cruzada).
+- `train_test_split_manual` baraja los índices con `np.random.default_rng(semilla).permutation`.
+- `accuracy`, `precision`, `recall` y `f1` toman 1 como clase positiva y devuelven 0 en vez de dividir entre cero.
+- `validacion_cruzada` parte los datos en `k` folds excluyentes con la misma semilla, crea un modelo nuevo por fold y devuelve un dict plano:
 
 ```python
-modelo = modelo_cls(**params)        # o modelo_base.clonar()
-modelo.fit(X.iloc[idx_train], y[idx_train])     # .iloc si X es DataFrame
-y_pred = modelo.predict(X.iloc[idx_val])
+{"accuracy_media": 0.857, "accuracy_desv": 0.003, "precision_media": ..., "precision_desv": ...,
+ "recall_media": ..., "recall_desv": ..., "f1_media": ..., "f1_desv": ...}
 ```
 
 ### Para la Persona C (experimentos y análisis)
