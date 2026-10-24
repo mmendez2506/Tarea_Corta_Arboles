@@ -76,14 +76,7 @@ cv = validacion_cruzada(ArbolDecision, {"max_depth": 10, "min_split_samples": 30
 
 `python experimentos.py` corre las 10 combinaciones con validación cruzada de 5 folds (~1 min) e imprime la tabla y el modelo escogido. El notebook usa las mismas funciones (`correr_experimentos` y `escoger_mejor`).
 
-`experimentos.py` espera que `validacion_cruzada` devuelva un dict plano con media y desviación de cada métrica:
-
-```python
-{"accuracy_media": 0.857, "accuracy_desv": 0.003, "precision_media": ..., "precision_desv": ...,
- "recall_media": ..., "recall_desv": ..., "f1_media": ..., "f1_desv": ...}
-```
-
-`src/datos.py` y `src/evaluacion.py` tienen por ahora una versión provisional de la Persona C para poder correr los experimentos; se reemplazan por la de la Persona B al mergear `evaluacion`. Después de eso hay que volver a correr el notebook.
+El mejor modelo se escoge con la **regla de un error estándar**: entre las combinaciones cuyo F1 medio está a menos de `desv / √k` del mejor, la de menos hojas. Resultado: `max_depth=10`, `min_split_samples=300`, gini, con F1 0.667 en validación y 0.667 en test.
 
 ## Flujo de Git
 
